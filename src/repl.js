@@ -26,9 +26,11 @@ export function mount(langId, root) {
   const lang = LANGUAGES[langId];
   const t = strings();
   const params = new URLSearchParams(location.search);
+  const embedded = window.parent !== window;
   const historyKey = `repl-history-${langId}`;
 
-  root.className = "repl";
+  root.className = "repl loading";
+  root.classList.toggle("no-header", params.get("header") === "0");
   root.innerHTML = `
     <header>
       <span class="title">${lang.name}</span>
@@ -38,31 +40,34 @@ export function mount(langId, root) {
       <button class="restart">${t.restart}</button>
       <button class="clear">${t.clear}</button>
     </header>
+    <div class="progress" aria-hidden="true"></div>
     <div class="scroll">
       <section class="output" aria-live="polite"></section>
       <form class="entry">
         <pre class="gutter" aria-hidden="true"></pre>
-        <textarea spellcheck="false" autocapitalize="off" autocomplete="off" rows="1"
-                  placeholder="${t.placeholder}" aria-label="${t.placeholder}"></textarea>
+        <textarea spellcheck="false" autocapitalize="off" autocomplete="off" rows="1" disabled
+                  title="${t.hint}" aria-label="${lang.name}"></textarea>
       </form>
-    </div>
-    <footer>${t.hint}</footer>`;
+    </div>`;
 
   const $ = (sel) => root.querySelector(sel);
   const scroller = $(".scroll"), output = $(".output"), input = $("textarea"), gutter = $(".gutter");
   const stopBtn = $(".stop"), banner = $(".banner");
 
   let worker = null, ready = false, running = false, nextId = 1;
+  let captured = null;          // output of the entry being run, reported to the host page
   const pending = new Map();
+  const queue = [];             // host requests waiting for the interpreter to be free
   let history = [];
   try { history = JSON.parse(localStorage.getItem(historyKey)) || []; } catch { /* storage off */ }
   let cursor = history.length, draft = "";
 
   // ---- output ---------------------------------------------------------------------------------
   function write(text, cls) {
+    if (captured) captured.push({ stream: cls, text });
     const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
     const last = output.lastElementChild;
-    if (last && last.dataset.cls === cls && !last.dataset.closed) {
+    if (last && last.dataset.cls === cls) {
       last.textContent += text;
     } else {
       const el = document.createElement("div");
@@ -76,7 +81,6 @@ export function mount(langId, root) {
   function echo(code) {
     const el = document.createElement("div");
     el.className = "line echo";
-    el.dataset.closed = "1";
     code.split("\n").forEach((line, i) => {
       const row = document.createElement("div");
       const p = document.createElement("span");
@@ -88,35 +92,40 @@ export function mount(langId, root) {
     output.append(el);
     scroller.scrollTop = scroller.scrollHeight;
   }
-  const info = (text) => { write(text + "\n", "info"); output.lastElementChild.dataset.closed = "1"; };
 
   // ---- worker ---------------------------------------------------------------------------------
-  function start(message) {
+  // The entry stays disabled until the interpreter answers `ready`: nothing typed before that
+  // could run anyway, and Python takes a few seconds to load.
+  function start() {
     worker?.terminate();
     for (const resolve of pending.values()) resolve(null);
     pending.clear();
-    ready = false;
+    captured = null;
+    setReady(false);
     setRunning(false);
-    if (message) info(message);
-    info(t.loading(lang.name));
     worker = lang.worker();
     worker.onmessage = ({ data }) => {
       if (data.type === "ready") {
-        ready = true;
         banner.textContent = data.banner;
-        output.lastElementChild?.remove();   // the "loading" line
-        input.focus();
+        setReady(true);
+        notify("repl:ready", { banner: data.banner });
+        if (!embedded) input.focus();
+        drain();
       } else if (data.type === "out") {
         write(data.text, data.stream);
       } else if (data.type === "checked" || data.type === "done") {
         pending.get(data.id)?.(data);
         pending.delete(data.id);
       } else if (data.type === "fatal") {
+        root.classList.remove("loading");
         write(`${t.fatal} ${data.text}\n`, "error");
       }
     };
-    worker.onerror = (e) => write(`${t.fatal} ${e.message}\n`, "error");
-    worker.postMessage({ type: "init", root: new URL(".", rootUrl()).href, strings: { noInput: t.noInput } });
+    worker.onerror = (e) => {
+      root.classList.remove("loading");
+      write(`${t.fatal} ${e.message}\n`, "error");
+    };
+    worker.postMessage({ type: "init", root: rootUrl().href, strings: { noInput: t.noInput } });
   }
   function request(type, code) {
     const id = nextId++;
@@ -125,10 +134,19 @@ export function mount(langId, root) {
       worker.postMessage({ type, id, code });
     });
   }
+  function setReady(on) {
+    ready = on;
+    input.disabled = !on;
+    root.classList.toggle("loading", !on);
+  }
   function setRunning(on) {
     running = on;
     stopBtn.hidden = !on;
     root.classList.toggle("running", on);
+  }
+  function stop() {
+    start();
+    notify("repl:loading");
   }
 
   async function submit({ force = false } = {}) {
@@ -147,9 +165,20 @@ export function mount(langId, root) {
     resize();
     echo(entry);
     setRunning(true);
-    await request("run", langId === "py" ? code : entry);
+    captured = [];
+    const done = await request("run", langId === "py" ? code : entry);
+    const out = captured;
+    captured = null;
     setRunning(false);
     scroller.scrollTop = scroller.scrollHeight;
+    if (done) {
+      notify("repl:result", {
+        code: entry,
+        output: out.map((o) => o.text).join(""),
+        error: out.some((o) => o.stream === "error"),
+      });
+    }
+    drain();
   }
 
   // ---- input ----------------------------------------------------------------------------------
@@ -166,6 +195,10 @@ export function mount(langId, root) {
     input.style.height = input.scrollHeight + "px";
     const lines = input.value.split("\n").length;
     gutter.textContent = [lang.prompt, ...Array(lines - 1).fill(lang.more)].join("\n");
+  }
+  function setCode(code) {
+    input.value = String(code ?? "");
+    resize();
   }
   function remember(code) {
     if (history[history.length - 1] !== code) history.push(code);
@@ -212,32 +245,50 @@ export function mount(langId, root) {
     } else if (e.key === "l" && e.ctrlKey) {
       e.preventDefault();
       output.replaceChildren();
-    } else if (e.key === "c" && e.ctrlKey && running) {
-      e.preventDefault();
-      start(t.stopped);
     }
   });
-  root.addEventListener("keydown", (e) => {
-    if (e.key === "c" && e.ctrlKey && running) { e.preventDefault(); start(t.stopped); }
+  // Ctrl+C stops a running entry. Listened on the page: while code runs, the entry may not have
+  // the focus.
+  addEventListener("keydown", (e) => {
+    if (e.key === "c" && e.ctrlKey && running) { e.preventDefault(); stop(); }
   });
   $(".entry").addEventListener("submit", (e) => e.preventDefault());
-  $(".clear").addEventListener("click", () => { output.replaceChildren(); input.focus(); });
-  $(".restart").addEventListener("click", () => { output.replaceChildren(); start(t.restarted); });
-  stopBtn.addEventListener("click", () => start(t.stopped));
-  scroller.addEventListener("click", () => { if (!getSelection().toString()) input.focus(); });
+  $(".clear").addEventListener("click", () => { output.replaceChildren(); if (ready) input.focus(); });
+  $(".restart").addEventListener("click", () => { output.replaceChildren(); stop(); });
+  stopBtn.addEventListener("click", stop);
+  scroller.addEventListener("click", () => { if (ready && !getSelection().toString()) input.focus(); });
 
-  // A host page (same origin) can put code in the entry, and optionally run it.
+  // ---- embedding ------------------------------------------------------------------------------
+  // Any page may embed the REPL in an iframe and drive it with postMessage. Only the direct parent
+  // is listened to. The code it sends runs in the same worker as code typed by hand, so it can do
+  // nothing the person at the keyboard could not.
+  function notify(type, payload = {}) {
+    if (embedded) window.parent.postMessage({ type, lang: langId, ...payload }, "*");
+  }
+  function drain() {
+    while (ready && !running && queue.length) queue.shift()();
+  }
+  const HOST = {
+    "repl:code": (d) => { setCode(d.code); if (d.run) submit({ force: true }); },
+    "repl:run": (d) => { if (d.code !== undefined) setCode(d.code); submit({ force: true }); },
+    "repl:clear": () => output.replaceChildren(),
+    "repl:reset": () => { output.replaceChildren(); stop(); },
+    "repl:stop": () => { if (running) stop(); },
+    "repl:focus": () => input.focus(),
+  };
+  const IMMEDIATE = new Set(["repl:clear", "repl:reset", "repl:stop", "repl:focus"]);
   addEventListener("message", (e) => {
-    if (e.origin !== location.origin || e.data?.type !== "repl:code") return;
-    input.value = String(e.data.code ?? "");
-    resize();
-    input.focus();
-    if (e.data.run) submit({ force: true });
+    if (e.source !== window.parent || e.source === window) return;
+    const handler = HOST[e.data?.type];
+    if (!handler) return;
+    if (IMMEDIATE.has(e.data.type) || (ready && !running)) handler(e.data);
+    else queue.push(() => handler(e.data));
   });
 
-  if (params.has("code")) input.value = params.get("code");
+  if (params.has("code")) setCode(params.get("code"));
   resize();
   start();
+  notify("repl:loading");
 }
 
 // The folder that holds py/, lua/, js/ and pyodide/, wherever the app is served from.

@@ -35,7 +35,6 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .repl .line.stdout { color: var(--text); }
 .repl .line.result { color: var(--result); }
 .repl .line.error { color: var(--error); }
-.repl .line.info { color: var(--dim); font-style: italic; }
 .repl .line.echo { color: var(--text); margin-top: 6px; }
 .repl .prompt { color: var(--prompt); user-select: none; }
 
@@ -47,10 +46,21 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 }
 .repl textarea::placeholder { color: #5a5a5a; }
 .repl.running .entry { opacity: 0.5; }
-.repl footer {
-  padding: 4px 14px; color: var(--dim); font: 12px var(--sans);
-  border-top: 1px solid var(--line); background: var(--panel);
+.repl textarea:disabled { cursor: default; }
+.repl.no-header header { display: none; }
+
+/* Loading: a thin moving bar under the header, and a dimmed prompt. No text. */
+.repl .progress { height: 2px; overflow: hidden; position: relative; }
+.repl.loading .progress::after {
+  content: ""; position: absolute; inset: 0 auto 0 0; width: 30%;
+  background: var(--result); animation: repl-progress 1.1s ease-in-out infinite;
 }
+.repl.loading .gutter { opacity: 0.35; }
+@keyframes repl-progress { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) {
+  .repl.loading .progress::after { animation: none; width: 100%; opacity: 0.4; }
+}
+
 
 .home { display: grid; place-items: center; font-family: var(--sans); }
 .home main { text-align: center; padding: 24px; }
