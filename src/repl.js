@@ -37,7 +37,7 @@ export function mount(lang, root) {
   const scroller = $(".scroll"), output = $(".output"), input = $("textarea"), gutter = $(".gutter");
   const stopBtn = $(".stop"), banner = $(".banner");
 
-  let worker = null, ready = false, running = false, nextId = 1;
+  let worker = null, ready = false, running = false, checking = false, nextId = 1;
   let captured = null;          // output of the entry being run, reported to the host page
   const pending = new Map();
   const queue = [];             // host requests waiting for the interpreter to be free
@@ -136,11 +136,16 @@ export function mount(lang, root) {
     // A last line holding only the automatic indentation counts as an empty line: in Python,
     // that is what ends a block.
     const code = input.value.replace(/\n[ \t]+$/, "\n");
-    if (!ready || running) return;
+    // `checking` closes the gap while the worker says whether the entry is finished: without it,
+    // a second Enter pressed in that gap would start a second run.
+    if (!ready || running || checking) return;
     if (!code.trim()) { echo(""); return; }
     if (!force) {
-      const res = await request("check", code);
-      if (res && res.status === "incomplete") { newline(); return; }
+      checking = true;
+      let res;
+      try { res = await request("check", code); } finally { checking = false; queueMicrotask(drain); }
+      if (!res || !ready || running) return;
+      if (res.status === "incomplete") { newline(); return; }
     }
     const entry = code.replace(/\s+$/, "");
     remember(entry);
@@ -148,10 +153,10 @@ export function mount(lang, root) {
     resize();
     echo(entry);
     setRunning(true);
-    captured = [];
+    const out = [];
+    captured = out;
     const done = await request("run", langId === "py" ? code : entry);
-    const out = captured;
-    captured = null;
+    if (captured === out) captured = null;
     setRunning(false);
     scroller.scrollTop = scroller.scrollHeight;
     if (done) {
@@ -249,7 +254,7 @@ export function mount(lang, root) {
     if (embedded) window.parent.postMessage({ type, lang: langId, ...payload }, "*");
   }
   function drain() {
-    while (ready && !running && queue.length) queue.shift()();
+    while (ready && !running && !checking && queue.length) queue.shift()();
   }
   const HOST = {
     "repl:code": (d) => { setCode(d.code); if (d.run) submit({ force: true }); },
@@ -264,7 +269,7 @@ export function mount(lang, root) {
     if (e.source !== window.parent || e.source === window) return;
     const handler = HOST[e.data?.type];
     if (!handler) return;
-    if (IMMEDIATE.has(e.data.type) || (ready && !running)) handler(e.data);
+    if (IMMEDIATE.has(e.data.type) || (ready && !running && !checking)) handler(e.data);
     else queue.push(() => handler(e.data));
   });
 
