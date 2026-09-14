@@ -37,7 +37,7 @@ export function mount(lang, root) {
       <button class="clear">${t.clear}</button>
     </header>
     <div class="progress" aria-hidden="true"></div>
-    <div class="terminal" title="${t.hint}"></div>`;
+    <div class="term-host" title="${t.hint}"></div>`;
 
   const $ = (sel) => root.querySelector(sel);
   const stopBtn = $(".stop"), banner = $(".banner");
@@ -64,9 +64,9 @@ export function mount(lang, root) {
   const rl = new Readline();
   term.loadAddon(fit);
   term.loadAddon(rl);
-  term.open($(".terminal"));
+  term.open($(".term-host"));
   fit.fit();
-  new ResizeObserver(() => fit.fit()).observe($(".terminal"));
+  new ResizeObserver(() => fit.fit()).observe($(".term-host"));
 
   let isComplete = () => true;
   let forceSubmit = false;

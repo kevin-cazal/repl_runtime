@@ -1,3 +1,4 @@
+/* The terminal container is .term-host, not .terminal: xterm.js puts that class on its own element. */
 :root {
   --bg: #1e1e1e;
   --panel: #252526;
@@ -30,11 +31,11 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .repl button:hover { background: #2a2d2e; }
 .repl button.stop { background: #a1260d; border-color: #a1260d; color: #fff; }
 
-.repl .terminal { flex: 1; min-height: 0; padding: 8px 0 0 12px; background: var(--bg); }
-.repl .terminal .xterm { height: 100%; }
-.repl .terminal .xterm .xterm-viewport,
-.repl .terminal .xterm .xterm-scrollable-element { background-color: var(--bg) !important; }
-.repl .terminal .xterm-viewport { scrollbar-width: thin; }
+.repl .term-host { flex: 1; min-height: 0; padding: 8px 0 0 12px; background: var(--bg); }
+.repl .term-host .xterm { height: 100%; }
+.repl .term-host .xterm .xterm-viewport,
+.repl .term-host .xterm .xterm-scrollable-element { background-color: var(--bg) !important; }
+.repl .term-host .xterm-viewport { scrollbar-width: thin; }
 .repl.no-header header { display: none; }
 
 /* Loading: a thin moving bar under the header, and no prompt until the interpreter is ready. */
