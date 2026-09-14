@@ -30,32 +30,19 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .repl button:hover { background: #2a2d2e; }
 .repl button.stop { background: #a1260d; border-color: #a1260d; color: #fff; }
 
-.repl .scroll { flex: 1; overflow-y: auto; padding-bottom: 40vh; cursor: text; }
-.repl .output { padding: 10px 14px 0; white-space: pre-wrap; word-break: break-word; }
-.repl .line.stdout { color: var(--text); }
-.repl .line.result { color: var(--result); }
-.repl .line.error { color: var(--error); }
-.repl .line.echo { color: var(--text); margin-top: 6px; }
-.repl .prompt { color: var(--prompt); user-select: none; }
-
-.repl .entry { display: flex; align-items: flex-start; padding: 4px 14px 10px; }
-.repl .gutter { margin: 0; color: var(--prompt); font: inherit; user-select: none; white-space: pre; padding-right: 1ch; }
-.repl textarea {
-  flex: 1; resize: none; overflow: hidden; border: 0; outline: 0; padding: 0; margin: 0;
-  background: transparent; color: var(--text); font: inherit; caret-color: var(--text); tab-size: 4;
-}
-.repl textarea::placeholder { color: #5a5a5a; }
-.repl.running .entry { opacity: 0.5; }
-.repl textarea:disabled { cursor: default; }
+.repl .terminal { flex: 1; min-height: 0; padding: 8px 0 0 12px; background: var(--bg); }
+.repl .terminal .xterm { height: 100%; }
+.repl .terminal .xterm .xterm-viewport,
+.repl .terminal .xterm .xterm-scrollable-element { background-color: var(--bg) !important; }
+.repl .terminal .xterm-viewport { scrollbar-width: thin; }
 .repl.no-header header { display: none; }
 
-/* Loading: a thin moving bar under the header, and a dimmed prompt. No text. */
+/* Loading: a thin moving bar under the header, and no prompt until the interpreter is ready. */
 .repl .progress { height: 2px; overflow: hidden; position: relative; }
 .repl.loading .progress::after {
   content: ""; position: absolute; inset: 0 auto 0 0; width: 30%;
   background: var(--result); animation: repl-progress 1.1s ease-in-out infinite;
 }
-.repl.loading .gutter { opacity: 0.35; }
 @keyframes repl-progress { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 @media (prefers-reduced-motion: reduce) {
   .repl.loading .progress::after { animation: none; width: 100%; opacity: 0.4; }

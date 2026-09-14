@@ -1,6 +1,6 @@
 // JavaScript REPL. Each entry runs as a classic script through importScripts(), so top-level
 // `let`, `const`, `function` and `class` declarations stay available to the next entry.
-import { parse, parseExpressionAt } from "acorn";
+import { isComplete, split } from "../langs/js-syntax.js";
 
 const post = (msg) => self.postMessage(msg);
 
@@ -26,33 +26,6 @@ const log = (stream) => (...args) => post({ type: "out", stream, text: args.map(
 console.log = console.info = console.debug = log("stdout");
 console.warn = console.error = log("error");
 
-// Parse with acorn, like Node's own REPL: an error at the very end of the entry means it is not
-// finished yet, and the syntax tree tells a declaration from an expression whose value we show.
-const PARSE = { ecmaVersion: "latest", sourceType: "script" };
-
-function check(code) {
-  try {
-    parse(code, PARSE);
-    return "complete";
-  } catch (err) {
-    return err.pos >= code.trimEnd().length || /Unterminated template/.test(err.message) ? "incomplete" : "complete";
-  }
-}
-
-// Split an entry into [statements, lastExpression]: the value of the last expression is shown.
-function split(code) {
-  let program;
-  try { program = parse(code, PARSE); } catch { return [code, null]; }
-  const body = program.body;
-  const last = body[body.length - 1];
-  if (body.length === 1 && last.type === "BlockStatement") {
-    try { parseExpressionAt(`(${code})`, 0, PARSE); return ["", code]; } catch { return [code, null]; }   // {a: 1}
-  }
-  if (!last || last.type !== "ExpressionStatement") return [code, null];
-  const expr = code.slice(last.expression.start, last.expression.end);
-  return [code.slice(0, last.start), expr];
-}
-
 function runScript(source) {
   const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
   try { importScripts(url); } finally { URL.revokeObjectURL(url); }
@@ -62,7 +35,7 @@ self.onmessage = ({ data }) => {
   if (data.type === "init") {
     post({ type: "ready", banner: "JavaScript" });
   } else if (data.type === "check") {
-    post({ type: "checked", id: data.id, status: check(data.code) });
+    post({ type: "checked", id: data.id, status: isComplete(data.code) ? "complete" : "incomplete" });
   } else if (data.type === "run") {
     try {
       const [statements, expr] = split(data.code);

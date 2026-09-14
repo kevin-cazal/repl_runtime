@@ -1,10 +1,23 @@
+import "@xterm/xterm/css/xterm.css";
 import "./style.css";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { Readline } from "xterm-readline";
 import { strings } from "./i18n.js";
 
 const HISTORY_MAX = 200;
+const COLORS = {
+  result: "\x1b[38;2;78;201;176m",
+  error: "\x1b[38;2;244;135;113m",
+  prompt: "\x1b[38;2;86;156;214m",
+  reset: "\x1b[0m",
+};
 
-// `lang` is one of src/langs/*.js: each page imports only its own, so a build that contains
-// one language carries one worker.
+// The terminal is xterm.js, and line editing (cursor keys, history, multi-line entries, paste) is
+// the xterm-readline addon. This file only connects them to the interpreter in the worker.
+//
+// `lang` is one of src/langs/*.js: each page imports only its own, so a build that contains one
+// language carries one worker.
 export function mount(lang, root) {
   const langId = lang.id;
   const t = strings();
@@ -24,66 +37,102 @@ export function mount(lang, root) {
       <button class="clear">${t.clear}</button>
     </header>
     <div class="progress" aria-hidden="true"></div>
-    <div class="scroll">
-      <section class="output" aria-live="polite"></section>
-      <form class="entry">
-        <pre class="gutter" aria-hidden="true"></pre>
-        <textarea spellcheck="false" autocapitalize="off" autocomplete="off" rows="1" disabled
-                  title="${t.hint}" aria-label="${lang.name}"></textarea>
-      </form>
-    </div>`;
+    <div class="terminal" title="${t.hint}"></div>`;
 
   const $ = (sel) => root.querySelector(sel);
-  const scroller = $(".scroll"), output = $(".output"), input = $("textarea"), gutter = $(".gutter");
   const stopBtn = $(".stop"), banner = $(".banner");
 
-  let worker = null, ready = false, running = false, checking = false, nextId = 1;
-  let captured = null;          // output of the entry being run, reported to the host page
-  const pending = new Map();
-  const queue = [];             // host requests waiting for the interpreter to be free
-  let history = [];
-  try { history = JSON.parse(localStorage.getItem(historyKey)) || []; } catch { /* storage off */ }
-  let cursor = history.length, draft = "";
+  // ---- terminal -------------------------------------------------------------------------------
+  const style = getComputedStyle(root);
+  const css = (name) => style.getPropertyValue(name).trim();
+  const term = new Terminal({
+    fontFamily: css("--mono"),
+    fontSize: 15,
+    lineHeight: 1.25,
+    cursorBlink: true,
+    disableStdin: true,
+    convertEol: true,
+    scrollback: 5000,
+    theme: {
+      background: css("--bg"),
+      foreground: css("--text"),
+      cursor: css("--text"),
+      selectionBackground: "#264f78",
+    },
+  });
+  const fit = new FitAddon();
+  const rl = new Readline();
+  term.loadAddon(fit);
+  term.loadAddon(rl);
+  term.open($(".terminal"));
+  fit.fit();
+  new ResizeObserver(() => fit.fit()).observe($(".terminal"));
+
+  let isComplete = () => true;
+  let forceSubmit = false;
+  rl.setCheckHandler((code) => {
+    if (forceSubmit) { forceSubmit = false; return true; }
+    const complete = isComplete(code);
+    if (!complete) {
+      // Readline adds the new line after this returns; indent it like the one above.
+      const line = code.slice(code.lastIndexOf("\n") + 1);
+      const indent = line.match(/^[ \t]*/)[0] + (lang.opensBlock(line) ? lang.indent : "");
+      if (indent) setTimeout(() => term.input(indent));
+    }
+    return complete;
+  });
+  rl.setCtrlCHandler(() => { if (running) stop(); });
+
+  // Readline's own key handler only turns Shift+Enter into a new line. Setting ours replaces it,
+  // so keep that, and make Tab indent with the language's spaces instead of a tab character.
+  term.attachCustomKeyEventHandler((e) => {
+    const shiftEnter = e.key === "Enter" && e.shiftKey;
+    const tab = e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey;
+    if (!shiftEnter && !tab) return true;
+    e.preventDefault();          // Tab would otherwise move the focus out of the terminal
+    if (e.type === "keydown") term.input(shiftEnter ? "\x1b\r" : lang.indent);
+    return false;
+  });
 
   // ---- output ---------------------------------------------------------------------------------
-  function write(text, cls) {
-    if (captured) captured.push({ stream: cls, text });
-    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
-    const last = output.lastElementChild;
-    if (last && last.dataset.cls === cls) {
-      last.textContent += text;
-    } else {
-      const el = document.createElement("div");
-      el.className = `line ${cls}`;
-      el.dataset.cls = cls;
-      el.textContent = text;
-      output.append(el);
-    }
-    if (atBottom) scroller.scrollTop = scroller.scrollHeight;
-  }
-  function echo(code) {
-    const el = document.createElement("div");
-    el.className = "line echo";
-    code.split("\n").forEach((line, i) => {
-      const row = document.createElement("div");
-      const p = document.createElement("span");
-      p.className = "prompt";
-      p.textContent = (i === 0 ? lang.prompt : lang.more) + " ";
-      row.append(p, document.createTextNode(line));
-      el.append(row);
-    });
-    output.append(el);
-    scroller.scrollTop = scroller.scrollHeight;
+  let atLineStart = true;
+  let captured = null;          // output of the entry being run, reported to the host page
+  function write(text, stream) {
+    if (!text) return;
+    if (captured) captured.push({ stream, text });
+    const color = COLORS[stream];
+    term.write(color ? color + text + COLORS.reset : text);
+    atLineStart = text.endsWith("\n");
   }
 
   // ---- worker ---------------------------------------------------------------------------------
-  // The entry stays disabled until the interpreter answers `ready`: nothing typed before that
-  // could run anyway, and Python takes a few seconds to load.
+  let worker = null, ready = false, running = false, reading = false, nextId = 1;
+  let firstReady;
+  const loaded = new Promise((resolve) => { firstReady = resolve; });
+  const pending = new Map();
+  const queue = [];             // host requests waiting for the terminal to be free
+  let typeahead = [];           // keys typed while an entry runs, replayed at the next prompt
+
+  // Readline only listens during a read and drops keys typed meanwhile. A terminal keeps them:
+  // collect them here (Ctrl+C excepted, it stops the run) and hand them back to the next read.
+  term.onData((data) => {
+    if (ready && !reading && !data.includes("\x03")) typeahead.push(data);
+  });
+  function replayTypeahead() {
+    while (typeahead.length && reading) {
+      const data = typeahead.shift();
+      term.input(data);
+      if (data.includes("\r")) break;   // Enter ends this read; the rest waits for the next one
+    }
+  }
+
+  // Nothing can be typed until the interpreter answers `ready`: stdin stays disabled.
   function start() {
     worker?.terminate();
     for (const resolve of pending.values()) resolve(null);
     pending.clear();
     captured = null;
+    typeahead = [];
     setReady(false);
     setRunning(false);
     worker = lang.worker();
@@ -92,11 +141,11 @@ export function mount(lang, root) {
         banner.textContent = data.banner;
         setReady(true);
         notify("repl:ready", { banner: data.banner });
-        if (!embedded) input.focus();
+        firstReady();
         drain();
       } else if (data.type === "out") {
         write(data.text, data.stream);
-      } else if (data.type === "checked" || data.type === "done") {
+      } else if (data.type === "done") {
         pending.get(data.id)?.(data);
         pending.delete(data.id);
       } else if (data.type === "fatal") {
@@ -119,8 +168,9 @@ export function mount(lang, root) {
   }
   function setReady(on) {
     ready = on;
-    input.disabled = !on;
+    term.options.disableStdin = !on;
     root.classList.toggle("loading", !on);
+    if (on && !embedded) term.focus();
   }
   function setRunning(on) {
     running = on;
@@ -132,119 +182,70 @@ export function mount(lang, root) {
     notify("repl:loading");
   }
 
-  async function submit({ force = false } = {}) {
-    // A last line holding only the automatic indentation counts as an empty line: in Python,
-    // that is what ends a block.
-    const code = input.value.replace(/\n[ \t]+$/, "\n");
-    // `checking` closes the gap while the worker says whether the entry is finished: without it,
-    // a second Enter pressed in that gap would start a second run.
-    if (!ready || running || checking) return;
-    if (!code.trim()) { echo(""); return; }
-    if (!force) {
-      checking = true;
-      let res;
-      try { res = await request("check", code); } finally { checking = false; queueMicrotask(drain); }
-      if (!res || !ready || running) return;
-      if (res.status === "incomplete") { newline(); return; }
+  // ---- read, run, repeat ----------------------------------------------------------------------
+  async function loop() {
+    for (;;) {
+      if (!atLineStart) write("\n");
+      const line = rl.read(COLORS.prompt + lang.prompt + COLORS.reset);
+      await new Promise((resolve) => term.write("", resolve));   // the read is now active
+      reading = true;
+      replayTypeahead();
+      drain();
+      const code = await line;
+      reading = false;
+      atLineStart = true;
+      await run(code);
     }
-    const entry = code.replace(/\s+$/, "");
-    remember(entry);
-    input.value = "";
-    resize();
-    echo(entry);
+  }
+
+  async function run(code) {
+    if (!code.trim()) return;
+    remember(code);
     setRunning(true);
     const out = [];
     captured = out;
-    const done = await request("run", langId === "py" ? code : entry);
+    const done = await request("run", code);
     if (captured === out) captured = null;
     setRunning(false);
-    scroller.scrollTop = scroller.scrollHeight;
     if (done) {
       notify("repl:result", {
-        code: entry,
+        code: code.replace(/\s+$/, ""),
         output: out.map((o) => o.text).join(""),
         error: out.some((o) => o.stream === "error"),
       });
     }
-    drain();
   }
 
-  // ---- input ----------------------------------------------------------------------------------
-  function newline() {
-    const { selectionStart: s, value } = input;
-    const line = value.slice(value.lastIndexOf("\n", s - 1) + 1, s);
-    let indent = line.match(/^\s*/)[0];
-    if (lang.opensBlock(line)) indent += lang.indent;
-    input.setRangeText("\n" + indent, s, input.selectionEnd, "end");
-    resize();
+  // Put code on the current line, as if typed. With `submit`, press Enter for it.
+  function enter(code, submit) {
+    rl.updateLine(String(code ?? ""));
+    if (submit) {
+      forceSubmit = true;
+      term.input("\r");
+      reading = false;   // this read is over: the next queued request waits for the next prompt
+    }
   }
-  function resize() {
-    input.style.height = "auto";
-    input.style.height = input.scrollHeight + "px";
-    const lines = input.value.split("\n").length;
-    gutter.textContent = [lang.prompt, ...Array(lines - 1).fill(lang.more)].join("\n");
+
+  function clear() {
+    term.clear();
+    if (reading) rl.updateLine(rl.getLine());
   }
-  function setCode(code) {
-    input.value = String(code ?? "");
-    resize();
-  }
+
+  // ---- history --------------------------------------------------------------------------------
+  let history = [];
+  try { history = JSON.parse(localStorage.getItem(historyKey)) || []; } catch { /* storage off */ }
+  for (const entry of history) rl.appendHistory(entry);
   function remember(code) {
-    if (history[history.length - 1] !== code) history.push(code);
+    const entry = code.replace(/\s+$/, "");
+    if (history[history.length - 1] !== entry) history.push(entry);
     history = history.slice(-HISTORY_MAX);
-    cursor = history.length;
     try { localStorage.setItem(historyKey, JSON.stringify(history)); } catch { /* storage off */ }
   }
-  function recall(step) {
-    if (!history.length) return false;
-    if (cursor === history.length) draft = input.value;
-    cursor = Math.max(0, Math.min(history.length, cursor + step));
-    input.value = cursor === history.length ? draft : history[cursor];
-    resize();
-    return true;
-  }
 
-  // Typing `end`, `else` or `}` on an indented line moves it back one level.
-  input.addEventListener("input", () => {
-    const { selectionStart: s, value } = input;
-    const start = value.lastIndexOf("\n", s - 1) + 1;
-    const line = value.slice(start, s);
-    const m = line.match(/^([ \t]+)(end|else|elseif|until|\}|\]|\))$/);
-    if (m && m[1].length >= lang.indent.length && value.slice(s, value.indexOf("\n", s) >>> 0).trim() === "") {
-      input.setRangeText(line.slice(lang.indent.length), start, s, "end");
-    }
-    resize();
-  });
-  input.addEventListener("keydown", (e) => {
-    const { selectionStart: s, value } = input;
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-      e.preventDefault();
-      submit({ force: e.ctrlKey || e.metaKey });
-    } else if (e.key === "Enter" && e.shiftKey) {
-      e.preventDefault();
-      newline();
-    } else if (e.key === "Tab" && !e.shiftKey) {
-      e.preventDefault();
-      input.setRangeText(lang.indent, s, input.selectionEnd, "end");
-      resize();
-    } else if (e.key === "ArrowUp" && !value.slice(0, s).includes("\n")) {
-      if (recall(-1)) { e.preventDefault(); input.setSelectionRange(input.value.length, input.value.length); }
-    } else if (e.key === "ArrowDown" && !value.slice(s).includes("\n")) {
-      if (recall(+1)) e.preventDefault();
-    } else if (e.key === "l" && e.ctrlKey) {
-      e.preventDefault();
-      output.replaceChildren();
-    }
-  });
-  // Ctrl+C stops a running entry. Listened on the page: while code runs, the entry may not have
-  // the focus.
-  addEventListener("keydown", (e) => {
-    if (e.key === "c" && e.ctrlKey && running) { e.preventDefault(); stop(); }
-  });
-  $(".entry").addEventListener("submit", (e) => e.preventDefault());
-  $(".clear").addEventListener("click", () => { output.replaceChildren(); if (ready) input.focus(); });
-  $(".restart").addEventListener("click", () => { output.replaceChildren(); stop(); });
+  // ---- buttons --------------------------------------------------------------------------------
+  $(".clear").addEventListener("click", () => { clear(); if (ready) term.focus(); });
+  $(".restart").addEventListener("click", () => { clear(); stop(); });
   stopBtn.addEventListener("click", stop);
-  scroller.addEventListener("click", () => { if (ready && !getSelection().toString()) input.focus(); });
 
   // ---- embedding ------------------------------------------------------------------------------
   // Any page may embed the REPL in an iframe and drive it with postMessage. Only the direct parent
@@ -253,30 +254,36 @@ export function mount(lang, root) {
   function notify(type, payload = {}) {
     if (embedded) window.parent.postMessage({ type, lang: langId, ...payload }, "*");
   }
+  const free = () => ready && reading && !running;
   function drain() {
-    while (ready && !running && !checking && queue.length) queue.shift()();
+    while (free() && queue.length) queue.shift()();
   }
   const HOST = {
-    "repl:code": (d) => { setCode(d.code); if (d.run) submit({ force: true }); },
-    "repl:run": (d) => { if (d.code !== undefined) setCode(d.code); submit({ force: true }); },
-    "repl:clear": () => output.replaceChildren(),
-    "repl:reset": () => { output.replaceChildren(); stop(); },
+    "repl:code": (d) => enter(d.code, d.run),
+    "repl:run": (d) => enter(d.code !== undefined ? d.code : rl.getLine(), true),
+    "repl:clear": () => clear(),
+    "repl:reset": () => { clear(); stop(); },
     "repl:stop": () => { if (running) stop(); },
-    "repl:focus": () => input.focus(),
+    "repl:focus": () => term.focus(),
   };
   const IMMEDIATE = new Set(["repl:clear", "repl:reset", "repl:stop", "repl:focus"]);
   addEventListener("message", (e) => {
     if (e.source !== window.parent || e.source === window) return;
     const handler = HOST[e.data?.type];
     if (!handler) return;
-    if (IMMEDIATE.has(e.data.type) || (ready && !running && !checking)) handler(e.data);
+    if (IMMEDIATE.has(e.data.type) || free()) handler(e.data);
     else queue.push(() => handler(e.data));
   });
 
-  if (params.has("code")) setCode(params.get("code"));
-  resize();
-  start();
+  // ---- go -------------------------------------------------------------------------------------
+  if (params.has("code")) queue.push(() => enter(params.get("code"), false));
   notify("repl:loading");
+  start();
+  // The first prompt appears once both the interpreter and the checker are loaded.
+  const checker = lang.checker()
+    .then((check) => { isComplete = check; })
+    .catch((err) => write(`${t.fatal} ${err}\n`, "error"));
+  Promise.all([checker, loaded]).then(loop);
 }
 
 // The folder that holds py/, lua/, js/ and pyodide/, wherever the app is served from.

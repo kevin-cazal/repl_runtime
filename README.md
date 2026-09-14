@@ -17,17 +17,23 @@ loaded (Pyodide is bundled, not fetched from a CDN).
 
 ## What it does
 
+- **A real terminal.** [xterm.js](https://xtermjs.org), with line editing from
+  [xterm-readline](https://github.com/strtok/xterm-readline): cursor keys, Home/End, Ctrl+U/K,
+  paste, and history with the up and down arrows (kept per language in `localStorage`).
 - **Real REPL behaviour.** The value of an expression is shown (`2 + 3` prints `5`); variables,
   functions and classes stay defined from one entry to the next.
 - **Multi-line entries.** Enter runs the entry when it is complete, and adds a line when it is not
-  (`for i in range(3):`, `if x > 0 then`, `function f() {`). Shift+Enter always adds a line.
-  Indentation follows blocks, and `end`, `else` or `}` move back one level.
+  (`for i in range(3):`, `if x > 0 then`, `function f() {`). Shift+Enter always adds a line, the
+  new line is indented like the block, and Tab indents with spaces. Deciding "complete or not" is
+  done in the page, synchronously: Lua compiles the entry with the same Lua as the interpreter
+  (compiling runs nothing), JavaScript parses it with acorn, Python follows the interactive
+  interpreter's rules (open brackets and strings continue, a `:` opens a block that an empty line
+  ends).
 - **Nothing freezes.** Each language runs in a Web Worker. An infinite loop shows a Stop button
-  (or Ctrl+C), which restarts the interpreter.
-- **No typing before it works.** The entry is locked until the interpreter has loaded, with a thin
-  progress bar instead of status messages.
-- **History** with the up and down arrows, kept per language in `localStorage`. Ctrl+L clears the
-  screen.
+  (or Ctrl+C), which restarts the interpreter. Keys typed while code runs are kept for the next
+  prompt, like in a terminal.
+- **No typing before it works.** The terminal ignores the keyboard until the interpreter has
+  loaded, with a thin progress bar instead of status messages.
 - **French interface** by default, `?lang=en` for English.
 
 ## Run it
@@ -40,7 +46,7 @@ npm run build      # dist/
 
 `npm run build` copies Pyodide into `public/pyodide/` first, then builds with Vite.
 
-**One language only:** `REPL_LANGS=lua npm run build` builds the Lua REPL alone (about 350 KB,
+**One language only:** `REPL_LANGS=lua npm run build` builds the Lua REPL alone (about 1 MB,
 no Pyodide). `REPL_LANGS` takes a comma-separated subset of `py,lua,js`.
 
 ## Releases

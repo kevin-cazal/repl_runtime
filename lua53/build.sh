@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Rebuild vendor/lua53/lua53.js from the exact Lua source TIC-80 embeds.
+# Rebuild vendor/lua53/lua53.js from the exact Lua source TIC-80 embeds. The same module runs
+# the code (in the worker) and checks whether an entry is finished (in the page).
 #
 #   lua53/build.sh
 #
@@ -29,7 +30,7 @@ for f in $SRC; do FILES="$FILES lua/$f.c"; done
 docker run --rm -v "$WORK:/w" -v "$ROOT/lua53:/repl:ro" -w /w --user "$(id -u):$(id -g)" \
   -e HOME=/tmp -e EM_CACHE=/tmp/emcache "$EMSDK_IMAGE" \
   emcc -O2 -DLUA_COMPAT_5_2 -Ilua /repl/repl.c $FILES -o lua53.js \
-    -sMODULARIZE -sEXPORT_ES6 -sEXPORT_NAME=createLua53 -sENVIRONMENT=worker \
+    -sMODULARIZE -sEXPORT_ES6 -sEXPORT_NAME=createLua53 -sENVIRONMENT=web,worker \
     -sSINGLE_FILE -sALLOW_MEMORY_GROWTH -sSTACK_SIZE=1048576 \
     -sEXPORTED_FUNCTIONS=_repl_init,_repl_check,_repl_run,_repl_version \
     -sEXPORTED_RUNTIME_METHODS=cwrap
