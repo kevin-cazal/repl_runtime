@@ -1,29 +1,12 @@
 import "./style.css";
 import { strings } from "./i18n.js";
 
-// Workers are listed literally: Vite only bundles `new Worker(new URL(...))` written this way.
-const LANGUAGES = {
-  py: {
-    name: "Python", prompt: ">>>", more: "...", indent: "    ",
-    opensBlock: (line) => /:\s*(#.*)?$/.test(line),
-    worker: () => new Worker(new URL("./workers/python.worker.js", import.meta.url), { type: "module" }),
-  },
-  lua: {
-    name: "Lua", prompt: ">", more: ">>", indent: "  ",
-    opensBlock: (line) => /\b(do|then|else|function\b.*\)|repeat)\s*(--.*)?$/.test(line) || /\{\s*$/.test(line),
-    worker: () => new Worker(new URL("./workers/lua.worker.js", import.meta.url)),
-  },
-  js: {
-    name: "JavaScript", prompt: ">", more: "...", indent: "  ",
-    opensBlock: (line) => /[{([]\s*(\/\/.*)?$/.test(line),
-    worker: () => new Worker(new URL("./workers/js.worker.js", import.meta.url)),
-  },
-};
-
 const HISTORY_MAX = 200;
 
-export function mount(langId, root) {
-  const lang = LANGUAGES[langId];
+// `lang` is one of src/langs/*.js: each page imports only its own, so a build that contains
+// one language carries one worker.
+export function mount(lang, root) {
+  const langId = lang.id;
   const t = strings();
   const params = new URLSearchParams(location.search);
   const embedded = window.parent !== window;

@@ -1,0 +1,6 @@
+// Written literally: Vite only bundles a worker created as `new Worker(new URL(...))`.
+export default {
+  id: "js", name: "JavaScript", prompt: ">", more: "...", indent: "  ",
+  opensBlock: (line) => /[{([]\s*(\/\/.*)?$/.test(line),
+  worker: () => new Worker(new URL("../workers/js.worker.js", import.meta.url)),
+};

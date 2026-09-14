@@ -1,0 +1,43 @@
+name: Release
+
+# Push a tag such as v0.2.0: two archives are attached to the GitHub release.
+#   repl_runtime-<tag>.tar.gz      every REPL (Python, Lua, JavaScript)
+#   repl_runtime-lua-<tag>.tar.gz  the Lua REPL only, for hosts such as tic80-web-editor
+# Both hold the dist itself at the archive root: extract them into the folder you serve.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Build every REPL
+        run: |
+          npm run build
+          tar -C dist -czf "repl_runtime-${GITHUB_REF_NAME}.tar.gz" .
+
+      - name: Build the Lua REPL only
+        run: |
+          rm -rf dist
+          REPL_LANGS=lua npm run build
+          tar -C dist -czf "repl_runtime-lua-${GITHUB_REF_NAME}.tar.gz" .
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum repl_runtime-*.tar.gz > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" repl_runtime-*.tar.gz SHA256SUMS \
+            --title "$GITHUB_REF_NAME" --generate-notes

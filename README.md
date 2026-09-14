@@ -6,7 +6,7 @@ One route per language:
 | Route  | Language   | Engine                                              |
 |--------|------------|-----------------------------------------------------|
 | `/py`  | Python 3   | [Pyodide](https://pyodide.org) (CPython in WebAssembly) |
-| `/lua` | Lua 5.4    | [wasmoon](https://github.com/ceifa/wasmoon) (reference Lua in WebAssembly) |
+| `/lua` | Lua 5.3.6  | the reference Lua, compiled to WebAssembly, configured like [TIC-80](https://tic80.com) |
 | `/js`  | JavaScript | the browser itself                                  |
 
 **Live demo:** https://kevin-cazal.github.io/repl_runtime/
@@ -39,6 +39,33 @@ npm run build      # dist/
 ```
 
 `npm run build` copies Pyodide into `public/pyodide/` first, then builds with Vite.
+
+**One language only:** `REPL_LANGS=lua npm run build` builds the Lua REPL alone (about 350 KB,
+no Pyodide). `REPL_LANGS` takes a comma-separated subset of `py,lua,js`.
+
+## Releases
+
+Each `v*` tag publishes two archives on the
+[releases page](https://github.com/kevin-cazal/repl_runtime/releases), with a `SHA256SUMS` file:
+
+| Archive | Content |
+|---|---|
+| `repl_runtime-<tag>.tar.gz` | every REPL, about 14 MB |
+| `repl_runtime-lua-<tag>.tar.gz` | the Lua REPL only |
+
+The dist is at the archive root: extract it into the folder you serve, for instance
+`public/repl/` of another Vite app. That is how
+[tic80-web-editor](https://github.com/kevin-cazal/tic80-web-editor) vendors its REPL panel.
+
+## Lua 5.3, like TIC-80
+
+The Lua REPL is not a Lua reimplementation: it is the reference Lua source that TIC-80 embeds
+(`lua/lua` at `75ea9cc`, release 5.3.6), compiled with the same `LUA_COMPAT_5_2` flag and opening
+the same standard libraries. What runs in the REPL runs in a TIC-80 cart.
+
+`lua53/repl.c` holds the REPL rules (expression first, `<eof>` means "not finished", the
+`print` that writes to the page). `lua53/build.sh` compiles it with Emscripten in Docker into
+`vendor/lua53/lua53.js`, which is committed: building the app never needs Emscripten.
 
 ## Embedding
 
@@ -115,8 +142,7 @@ not, so add `types { text/javascript mjs; }`.
 
 - No keyboard input from programs (`input()`, `io.read()`, `prompt()`).
 - Python: the standard library only. Extra packages are not bundled.
-- Lua is 5.4. Code written for Lua 5.3 (TIC-80, for example) runs the same for everything a
-  beginner writes; the differences are in corners such as integer-for-loop overflow and `<const>`.
+- Lua has the libraries TIC-80 opens, and no others: no `io`, `os` or `utf8`.
 - Stop and Restart clear all variables: the worker is replaced, not paused.
 
 ## License
