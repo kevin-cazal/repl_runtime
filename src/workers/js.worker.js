@@ -1,6 +1,7 @@
 // JavaScript REPL. Each entry runs as a classic script through importScripts(), so top-level
 // `let`, `const`, `function` and `class` declarations stay available to the next entry.
 import { isComplete, split } from "../langs/js-syntax.js";
+import { lineReader } from "./input.js";
 
 const post = (msg) => self.postMessage(msg);
 
@@ -33,6 +34,13 @@ function runScript(source) {
 
 self.onmessage = ({ data }) => {
   if (data.type === "init") {
+    // Workers have no prompt(): this one asks in the terminal, and returns null at the end of input
+    // (Ctrl+D), as the browser's returns null for Cancel.
+    const readLine = lineReader(data.input, data.strings.noInput);
+    self.prompt = (message) => {
+      if (message !== undefined) post({ type: "out", stream: "stdout", text: String(message) });
+      return readLine();
+    };
     post({ type: "ready", banner: "JavaScript" });
   } else if (data.type === "check") {
     post({ type: "checked", id: data.id, status: isComplete(data.code) ? "complete" : "incomplete" });

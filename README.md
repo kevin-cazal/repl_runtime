@@ -6,7 +6,7 @@ One route per language:
 | Route  | Language   | Engine                                              |
 |--------|------------|-----------------------------------------------------|
 | `/py`  | Python 3   | [Pyodide](https://pyodide.org) (CPython in WebAssembly) |
-| `/lua` | Lua 5.3.6  | the reference Lua, compiled to WebAssembly, configured like [TIC-80](https://tic80.com) |
+| `/lua` | Lua 5.3.6  | the reference Lua, compiled to WebAssembly, configured like [TIC-80](https://tic80.com), plus `io.read`/`io.write` |
 | `/js`  | JavaScript | the browser itself                                  |
 
 **Live demo:** https://kevin-cazal.github.io/repl_runtime/
@@ -32,6 +32,9 @@ loaded (Pyodide is bundled, not fetched from a CDN).
 - **Nothing freezes.** Each language runs in a Web Worker. An infinite loop shows a Stop button
   (or Ctrl+C), which restarts the interpreter. Keys typed while code runs are kept for the next
   prompt, like in a terminal.
+- **Programs can ask questions.** `input()` in Python, `io.read()` in Lua and `prompt()` in
+  JavaScript read a line typed in the terminal, after the question the program wrote. Ctrl+D on an
+  empty line ends the input (`EOFError`, `nil`, `null`), Ctrl+C stops the program.
 - **No typing before it works.** The terminal ignores the keyboard until the interpreter has
   loaded, with a thin progress bar instead of status messages.
 - **French interface** by default, `?lang=en` for English.
@@ -67,10 +70,12 @@ The dist is at the archive root: extract it into the folder you serve, for insta
 
 The Lua REPL is not a Lua reimplementation: it is the reference Lua source that TIC-80 embeds
 (`lua/lua` at `75ea9cc`, release 5.3.6), compiled with the same `LUA_COMPAT_5_2` flag and opening
-the same standard libraries. What runs in the REPL runs in a TIC-80 cart.
+the same standard libraries. One addition that TIC-80 does not have: an `io` table with only
+`io.read` (every Lua 5.3 format: `"l"`, `"L"`, `"n"`, `"a"`, a count) and `io.write`, on the
+terminal. There are no files.
 
 `lua53/repl.c` holds the REPL rules (expression first, `<eof>` means "not finished", the
-`print` that writes to the page). `lua53/build.sh` compiles it with Emscripten in Docker into
+`print` that writes to the page) and that `io`. `lua53/build.sh` compiles it with Emscripten in Docker into
 `vendor/lua53/lua53.js`, which is committed: building the app never needs Emscripten.
 
 ## Embedding
@@ -111,7 +116,7 @@ repl.addEventListener("repl-result", (e) => {
 |---|---|
 | `repl-loading` | `{ lang }`: the interpreter is (re)starting, the entry is locked |
 | `repl-ready` | `{ lang, banner }`: the entry is unlocked |
-| `repl-result` | `{ lang, code, output, error }`: after each entry, typed or sent |
+| `repl-result` | `{ lang, code, output, error }`: after each entry, typed or sent; `output` includes the lines typed for `input()` |
 
 The REPL lives in an iframe served from the same place as `embed.js`, so its interpreters and
 styles never touch the host page. Calls made before the interpreter is ready are queued and run in
@@ -144,11 +149,24 @@ absolute URLs instead.
 served as `application/octet-stream`. GitHub Pages does this already; the stock nginx image does
 not, so add `types { text/javascript mjs; }`.
 
+**Keyboard input** (`input()`, `io.read()`, `prompt()`) needs the worker running the program to
+wait for the page, which JavaScript only allows in two ways:
+
+- **Shared memory**, when the REPL page is cross-origin isolated, which takes two headers:
+  ```nginx
+  add_header Cross-Origin-Opener-Policy same-origin;
+  add_header Cross-Origin-Embedder-Policy require-corp;
+  ```
+- Otherwise **a service worker**, `input-sw.js`, which must stay at the root of the dist, next to
+  `py/`, `lua/` and `js/`. It answers only the REPL's own input requests. This works on GitHub
+  Pages and in iframes (an embedded REPL is not isolated unless its host page is), with no
+  header, and is a little slower. Where service workers are blocked
+  (some private browsing modes), programs get "Keyboard input is not available" when they read.
+
 ## Limits
 
-- No keyboard input from programs (`input()`, `io.read()`, `prompt()`).
 - Python: the standard library only. Extra packages are not bundled.
-- Lua has the libraries TIC-80 opens, and no others: no `io`, `os` or `utf8`.
+- Lua has the libraries TIC-80 opens, plus `io.read` and `io.write`: no files, no `os`, no `utf8`.
 - Stop and Restart clear all variables: the worker is replaced, not paused.
 
 ## License

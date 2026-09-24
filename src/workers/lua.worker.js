@@ -1,6 +1,7 @@
 // Lua REPL: Lua 5.3.6 compiled to WebAssembly, the same version, compile flags and standard
 // libraries as TIC-80 (see lua53/). The REPL rules live in lua53/repl.c.
 import createLua53 from "../../vendor/lua53/lua53.js";
+import { lineReader } from "./input.js";
 
 const STREAMS = ["stdout", "result", "error"];
 const decoder = new TextDecoder();
@@ -12,6 +13,7 @@ self.onmessage = async ({ data }) => {
     try {
       const module = await createLua53({
         onWrite: (bytes, stream) => post({ type: "out", stream: STREAMS[stream], text: decoder.decode(bytes) }),
+        readLine: lineReader(data.input, data.strings.noInput),   // io.read, in lua53/repl.c
       });
       lua = {
         check: module.cwrap("repl_check", "number", ["string"]),
