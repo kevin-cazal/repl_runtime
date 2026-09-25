@@ -4,6 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Readline } from "xterm-readline";
 import { strings } from "./i18n.js";
+import { inputChannel } from "./input.js";
 
 const HISTORY_MAX = 200;
 const COLORS = {
@@ -70,7 +71,9 @@ export function mount(lang, root) {
 
   let isComplete = () => true;
   let forceSubmit = false;
+  let inputting = null;         // while a program reads a line: { eof, history }
   rl.setCheckHandler((code) => {
+    if (inputting) return true;   // an answer, not code: Enter always sends it
     if (forceSubmit) { forceSubmit = false; return true; }
     const complete = isComplete(code);
     if (!complete) {
@@ -85,7 +88,15 @@ export function mount(lang, root) {
 
   // Readline's own key handler only turns Shift+Enter into a new line. Setting ours replaces it,
   // so keep that, and make Tab indent with the language's spaces instead of a tab character.
+  // While a program reads a line, Ctrl+C stops it and Ctrl+D on an empty line ends its input.
   term.attachCustomKeyEventHandler((e) => {
+    const ctrl = inputting && e.ctrlKey && !e.altKey && !e.metaKey;
+    if (ctrl && (e.key === "c" || (e.key === "d" && !rl.getLine()))) {
+      e.preventDefault();
+      if (e.type === "keydown" && e.key === "c") { term.write("^C"); stop(); }
+      if (e.type === "keydown" && e.key === "d") { inputting.eof = true; term.input("\r"); }
+      return false;
+    }
     const shiftEnter = e.key === "Enter" && e.shiftKey;
     const tab = e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey;
     if (!shiftEnter && !tab) return true;
@@ -96,6 +107,7 @@ export function mount(lang, root) {
 
   // ---- output ---------------------------------------------------------------------------------
   let atLineStart = true;
+  let lineTail = "";            // what is written on the current line, as written
   let captured = null;          // output of the entry being run, reported to the host page
   function write(text, stream) {
     if (!text) return;
@@ -103,10 +115,13 @@ export function mount(lang, root) {
     const color = COLORS[stream];
     term.write(color ? color + text + COLORS.reset : text);
     atLineStart = text.endsWith("\n");
+    const nl = text.lastIndexOf("\n"), tail = text.slice(nl + 1);
+    lineTail = (nl < 0 ? lineTail : "") + (color && tail ? color + tail + COLORS.reset : tail);
   }
 
   // ---- worker ---------------------------------------------------------------------------------
   let worker = null, ready = false, running = false, reading = false, nextId = 1;
+  let input = null;             // how programs get keyboard input, see src/input.js
   let firstReady;
   const loaded = new Promise((resolve) => { firstReady = resolve; });
   const pending = new Map();
@@ -128,6 +143,7 @@ export function mount(lang, root) {
 
   // Nothing can be typed until the interpreter answers `ready`: stdin stays disabled.
   function start() {
+    endInput();
     worker?.terminate();
     for (const resolve of pending.values()) resolve(null);
     pending.clear();
@@ -145,6 +161,8 @@ export function mount(lang, root) {
         drain();
       } else if (data.type === "out") {
         write(data.text, data.stream);
+      } else if (data.type === "input") {
+        readInput(data.id);
       } else if (data.type === "done") {
         pending.get(data.id)?.(data);
         pending.delete(data.id);
@@ -157,7 +175,7 @@ export function mount(lang, root) {
       root.classList.remove("loading");
       write(`${t.fatal} ${e.message}\n`, "error");
     };
-    worker.postMessage({ type: "init", root: rootUrl().href, strings: { noInput: t.noInput } });
+    worker.postMessage({ type: "init", root: rootUrl().href, input: input?.channel, strings: { noInput: t.noInput } });
   }
   function request(type, code) {
     const id = nextId++;
@@ -214,6 +232,34 @@ export function mount(lang, root) {
         error: out.some((o) => o.stream === "error"),
       });
     }
+  }
+
+  // A program reads a line (input(), io.read(), prompt()). What it wrote on this line, its question,
+  // becomes readline's prompt, so that editing keys stop at the end of it.
+  async function readInput(id) {
+    const from = worker;
+    inputting = { eof: false, history: rl.history.entries.slice() };
+    atLineStart = false;
+    term.write("\r\x1b[2K");
+    const line = rl.read(lineTail);
+    await new Promise((resolve) => term.write("", resolve));   // the read is now active
+    if (worker !== from) return;
+    reading = true;
+    replayTypeahead();
+    const text = await line;
+    if (worker !== from) return;   // stopped while waiting
+    const answer = inputting.eof ? null : text;
+    endInput();
+    atLineStart = true;
+    lineTail = "";
+    if (captured && answer !== null) captured.push({ stream: "input", text: answer + "\n" });
+    input.answer(id, answer);
+  }
+  function endInput() {
+    if (!inputting) return;
+    rl.history.entries = inputting.history;   // answers are not code: keep them out of the history
+    inputting = null;
+    reading = false;
   }
 
   // Put code on the current line, as if typed. With `submit`, press Enter for it.
@@ -278,7 +324,7 @@ export function mount(lang, root) {
   // ---- go -------------------------------------------------------------------------------------
   if (params.has("code")) queue.push(() => enter(params.get("code"), false));
   notify("repl:loading");
-  start();
+  inputChannel(rootUrl()).then((channel) => { input = channel; start(); });
   // The first prompt appears once both the interpreter and the checker are loaded.
   const checker = lang.checker()
     .then((check) => { isComplete = check; })

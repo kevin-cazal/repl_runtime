@@ -1,5 +1,7 @@
 // Python REPL on Pyodide, in a module worker (Pyodide refuses classic workers).
 // The REPL logic itself is written in Python, below.
+import { lineReader } from "./input.js";
+
 let py = null;
 
 const REPL = String.raw`
@@ -54,7 +56,19 @@ self.onmessage = async ({ data }) => {
       py = await loadPyodide({ indexURL: new URL("pyodide/", data.root).href });
       py.setStdout(stream("stdout"));
       py.setStderr(stream("error"));
-      py.setStdin({ stdin: () => { throw new Error(data.strings.noInput); } });
+      const readLine = lineReader(data.input, data.strings.noInput);
+      py.setStdin({
+        stdin: () => {
+          try {
+            const line = readLine();
+            return line === null ? null : line + "\n";
+          } catch (err) {
+            // Pyodide turns any error here into a bare "OSError: I/O error": say why first.
+            post({ type: "out", stream: "error", text: `\n${err.message}\n` });
+            throw err;
+          }
+        },
+      });
       py.runPython(REPL);
       const version = py.runPython("import sys; sys.version.split()[0]");
       post({ type: "ready", banner: `Python ${version} (Pyodide ${py.version})` });

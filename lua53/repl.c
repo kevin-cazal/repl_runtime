@@ -1,11 +1,14 @@
 /*
  * A Lua 5.3 REPL core for the browser, built against the exact Lua source TIC-80 embeds
- * (lua/lua 75ea9cc, 5.3.6) with the same compile flag (LUA_COMPAT_5_2) and the same standard
- * libraries: no io, no os, no utf8. What works here works in a TIC-80 cart, and the reverse.
+ * (lua/lua 75ea9cc, 5.3.6) with the same compile flag (LUA_COMPAT_5_2) and the standard
+ * libraries TIC-80 opens, plus a small `io` with only io.read and io.write, on the terminal:
+ * no files, no os, no utf8.
  *
  * The REPL rules are those of the standalone `lua` interpreter (lua.c): an entry is tried as
  * an expression first, then as a statement; a syntax error ending in <eof> means "not finished".
  */
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <emscripten.h>
 #include "lua.h"
@@ -56,6 +59,160 @@ static void write_error(lua_State *L) {
   write_str("\n", 1, OUT_ERROR);
 }
 
+/* ---- keyboard input ------------------------------------------------------------------------ */
+
+/* One line typed in the terminal (malloc'd, without its newline), or NULL at the end of input.
+   When the page offers no input at all, *failed is set and the result is the message to raise. */
+EM_JS(char *, js_read_line, (int *failed), {
+  try {
+    const line = Module.readLine();
+    return line === null ? 0 : stringToNewUTF8(line);
+  } catch (err) {
+    HEAP32[failed >> 2] = 1;
+    return stringToNewUTF8(String(err.message || err));
+  }
+});
+
+/* What has been typed and not read yet. Emptied at each entry: the answers typed for one entry
+   are not left over for the next. */
+static char *in_buf = NULL;
+static size_t in_len = 0, in_pos = 0;
+
+/* Wait for one more line, kept with its newline. 0 at the end of input. */
+static int fill(lua_State *L) {
+  int failed = 0;
+  char *line = js_read_line(&failed);
+  if (failed) {
+    luaL_where(L, 1);
+    lua_pushstring(L, line);
+    free(line);
+    lua_concat(L, 2);
+    lua_error(L);
+  }
+  if (line == NULL) return 0;
+  size_t rest = in_len - in_pos, n = strlen(line);
+  char *buf = malloc(rest + n + 1);
+  memcpy(buf, in_buf + in_pos, rest);
+  memcpy(buf + rest, line, n);
+  buf[rest + n] = '\n';
+  free(in_buf);
+  free(line);
+  in_buf = buf;
+  in_len = rest + n + 1;
+  in_pos = 0;
+  return 1;
+}
+
+static int read_line(lua_State *L, int keep_newline) {
+  if (in_pos == in_len && !fill(L)) return 0;
+  const char *s = in_buf + in_pos, *nl = memchr(s, '\n', in_len - in_pos);
+  size_t n = nl ? (size_t)(nl - s) : in_len - in_pos;
+  lua_pushlstring(L, s, n + (keep_newline && nl));
+  in_pos += n + (nl != NULL);
+  return 1;
+}
+
+static int read_chars(lua_State *L, size_t k) {
+  while (in_len - in_pos < (k ? k : 1) && fill(L)) {}
+  if (in_pos == in_len) return 0;
+  size_t n = in_len - in_pos < k ? in_len - in_pos : k;
+  lua_pushlstring(L, in_buf + in_pos, n);
+  in_pos += n;
+  return 1;
+}
+
+static int read_all(lua_State *L) {
+  while (fill(L)) {}
+  lua_pushlstring(L, in_buf + in_pos, in_len - in_pos);
+  in_pos = in_len;
+  return 1;
+}
+
+/* Like liolib: skip spaces (and lines), take the characters a numeral can have, convert. */
+static int read_number(lua_State *L) {
+  for (;;) {
+    while (in_pos < in_len && strchr(" \t\r\n\f\v", in_buf[in_pos])) in_pos++;
+    if (in_pos < in_len) break;
+    if (!fill(L)) return 0;
+  }
+  char numeral[201];
+  size_t n = 0;
+  while (in_pos < in_len && n < sizeof(numeral) - 1
+         && strchr("0123456789abcdefABCDEFxXpP.+-", in_buf[in_pos])) {
+    numeral[n++] = in_buf[in_pos++];
+  }
+  numeral[n] = '\0';
+  if (lua_stringtonumber(L, numeral) == 0) return 0;
+  return 1;
+}
+
+/* io.read(...): the formats of Lua 5.3 ("l", "L", "n", "a", a count), from the keyboard. */
+static int io_read(lua_State *L) {
+  int nargs = lua_gettop(L);
+  if (nargs == 0) {
+    lua_pushliteral(L, "l");
+    nargs = 1;
+  }
+  luaL_checkstack(L, nargs + LUA_MINSTACK, "too many arguments");
+  int n;
+  for (n = 1; n <= nargs; n++) {
+    int ok;
+    if (lua_type(L, n) == LUA_TNUMBER) {
+      ok = read_chars(L, (size_t)luaL_checkinteger(L, n));
+    } else {
+      const char *p = luaL_checkstring(L, n);
+      if (*p == '*') p++;
+      switch (*p) {
+        case 'n': ok = read_number(L); break;
+        case 'l': ok = read_line(L, 0); break;
+        case 'L': ok = read_line(L, 1); break;
+        case 'a': ok = read_all(L); break;
+        default: return luaL_argerror(L, n, "invalid format");
+      }
+    }
+    if (!ok) {
+      lua_pushnil(L);
+      return n;
+    }
+  }
+  return nargs;
+}
+
+/* io.write(...): strings and numbers, written as liolib writes them, without a newline. It
+   returns io, so io.write(a):write(b) works as with the real io.write, which returns a file. */
+static int io_write(lua_State *L) {
+  int top = lua_gettop(L);
+  int first = lua_rawequal(L, 1, lua_upvalueindex(1)) ? 2 : 1;   /* called as a method */
+  for (int i = first; i <= top; i++) {
+    size_t len;
+    const char *s;
+    char num[64];
+    if (lua_type(L, i) == LUA_TNUMBER) {
+      len = lua_isinteger(L, i)
+          ? (size_t)snprintf(num, sizeof(num), LUA_INTEGER_FMT, (LUAI_UACINT)lua_tointeger(L, i))
+          : (size_t)snprintf(num, sizeof(num), LUA_NUMBER_FMT, (LUAI_UACNUMBER)lua_tonumber(L, i));
+      s = num;
+    } else {
+      s = luaL_checklstring(L, i, &len);
+    }
+    write_str(s, len, OUT_STDOUT);
+  }
+  lua_pushvalue(L, lua_upvalueindex(1));
+  return 1;
+}
+
+static int open_io(lua_State *L) {
+  lua_newtable(L);
+  lua_pushcfunction(L, io_read);
+  lua_setfield(L, -2, "read");
+  lua_pushvalue(L, -1);
+  lua_pushcclosure(L, io_write, 1);
+  lua_setfield(L, -2, "write");
+  return 1;
+}
+
+/* ---- the REPL -------------------------------------------------------------------------------- */
+
 EMSCRIPTEN_KEEPALIVE
 const char *repl_version(void) { return LUA_RELEASE; }
 
@@ -69,6 +226,7 @@ int repl_init(void) {
     { LUA_STRLIBNAME, luaopen_string },
     { LUA_MATHLIBNAME, luaopen_math },
     { LUA_DBLIBNAME, luaopen_debug },
+    { LUA_IOLIBNAME, open_io },      /* not in TIC-80: io.read and io.write only */
     { NULL, NULL },
   };
   L = luaL_newstate();
@@ -110,6 +268,7 @@ int repl_check(const char *src) {
 EMSCRIPTEN_KEEPALIVE
 void repl_run(const char *src) {
   lua_settop(L, 0);
+  in_pos = in_len;
   if (load_entry(src) != LUA_OK || lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK) {
     write_error(L);
   } else if (lua_gettop(L) > 0) {
