@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { build, defineConfig } from "vite";
 import { resolve } from "node:path";
 import { ALL_LANGS, buildLangs } from "./languages.mjs";
 
@@ -22,6 +22,37 @@ export default defineConfig({
   // `const` survive from one entry to the next, like in a real console.
   worker: { format: "iife" },
   plugins: [
+    {
+      // `vite build` bundles the classic workers (worker.format above), but the dev server serves
+      // them file by file, and a classic worker cannot `import`. Bundle them on request instead.
+      name: "repl-dev-classic-workers",
+      apply: "serve",
+      configureServer(server) {
+        server.middlewares.use(async (req, res, next) => {
+          const url = new URL(req.url, "http://dev");
+          if (!url.searchParams.has("worker_file") || url.searchParams.get("type") !== "classic") return next();
+          try {
+            const { output } = await build({
+              configFile: false,
+              root: server.config.root,
+              publicDir: false,
+              logLevel: "silent",
+              build: {
+                write: false,
+                minify: false,
+                sourcemap: "inline",
+                rollupOptions: { input: resolve(server.config.root, "." + url.pathname), output: { format: "iife" } },
+              },
+            });
+            res.setHeader("content-type", "text/javascript");
+            res.setHeader("cache-control", "no-store");
+            res.end(output[0].code);
+          } catch (err) {
+            next(err);
+          }
+        });
+      },
+    },
     {
       name: "repl-langs",
       // The home page only links to the REPLs this build contains.
